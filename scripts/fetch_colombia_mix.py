@@ -65,11 +65,18 @@ def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date) -> l
         "StartDate": start.isoformat(),
         "EndDate": end.isoformat(),
         "Entity": entity,
+        "Filter": [],
     }
     resp = requests.post(f"{BASE_URL}/daily", json=body, headers=HEADERS, timeout=60)
-    resp.raise_for_status()
+    if not resp.ok:
+        print(f"  XM API error {resp.status_code} for {metric_id}/{entity} "
+              f"{start}->{end}. Response body:\n{resp.text[:2000]}")
+        resp.raise_for_status()
     payload = resp.json()
-    return payload.get("Items", payload.get("items", []))
+    items = payload.get("Items", payload.get("items", []))
+    if items:
+        print(f"  Sample item keys for {metric_id}: {list(items[0].keys())}")
+    return items
 
 
 def fetch_resource_catalog() -> dict:
@@ -80,16 +87,23 @@ def fetch_resource_catalog() -> dict:
     """
     body = {"MetricId": "ListadoRecursos"}
     resp = requests.post(f"{BASE_URL}/lists", json=body, headers=HEADERS, timeout=60)
-    resp.raise_for_status()
+    if not resp.ok:
+        print(f"  XM API error {resp.status_code} for ListadoRecursos. "
+              f"Response body:\n{resp.text[:2000]}")
+        resp.raise_for_status()
     payload = resp.json()
     items = payload.get("Items", payload.get("items", []))
+    print(f"  ListadoRecursos returned {len(items)} raw items")
+    if items:
+        print(f"  Sample item: {json.dumps(items[0], ensure_ascii=False)[:1000]}")
 
     mapping = {}
     for item in items:
         # Field names vary by XM release; try the common variants defensively.
-        code = item.get("Values_Code") or item.get("Codigo") or item.get("Values_Recurso")
-        tipo = (item.get("Values_Type") or item.get("Tipo") or "").upper()
-        combustible = (item.get("Values_Fuel") or item.get("Combustible") or "").upper()
+        code = (item.get("Values_Code") or item.get("Codigo") or item.get("Values_Recurso")
+                or item.get("Values_Cod") or item.get("Values_code"))
+        tipo = (item.get("Values_Type") or item.get("Tipo") or item.get("Values_TipoGeneracion") or "").upper()
+        combustible = (item.get("Values_Fuel") or item.get("Combustible") or item.get("Values_Combustible") or "").upper()
         if not code:
             continue
         mapping[code] = {"tipo": tipo, "combustible": combustible}
@@ -159,25 +173,29 @@ def sum_generation(items: list, resource_catalog: dict) -> dict:
 
 
 def fetch_daily(resource_catalog: dict) -> dict:
-    """Most recently completed day (yesterday — XM typically finalises 'Gene' a day behind)."""
-    yesterday = dt.date.today() - dt.timedelta(days=1)
-    print(f"Fetching Colombia daily generation: {yesterday}")
-
-    items = fetch_metric("Gene", "Recurso", yesterday, yesterday)
-    totals_by_fuel = sum_generation(items, resource_catalog)
-    mix = build_mix(totals_by_fuel)
-
-    if not mix:
-        raise SystemExit("No daily generation data returned from XM.")
-
-    return {
-        "country": "Colombia",
-        "period_start": yesterday.isoformat(),
-        "period_end": yesterday.isoformat(),
-        "generated_at_utc": dt.datetime.utcnow().isoformat() + "Z",
-        "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
-        "mix": mix,
-    }
+    """Most recently completed day. XM usually needs 1-2 days to finalise
+    'Gene' data, so we step back from 2 days ago and try a few days if needed."""
+    for days_back in (2, 3, 4, 5):
+        candidate = dt.date.today() - dt.timedelta(days=days_back)
+        print(f"Fetching Colombia daily generation: trying {candidate}")
+        try:
+            items = fetch_metric("Gene", "Recurso", candidate, candidate)
+        except requests.exceptions.HTTPError:
+            print(f"  {candidate} failed, trying an earlier day...")
+            continue
+        if items:
+            totals_by_fuel = sum_generation(items, resource_catalog)
+            mix = build_mix(totals_by_fuel)
+            if mix:
+                return {
+                    "country": "Colombia",
+                    "period_start": candidate.isoformat(),
+                    "period_end": candidate.isoformat(),
+                    "generated_at_utc": dt.datetime.utcnow().isoformat() + "Z",
+                    "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
+                    "mix": mix,
+                }
+    raise SystemExit("No daily generation data returned from XM after trying several recent days.")
 
 
 def fetch_ytd(resource_catalog: dict) -> dict:
@@ -214,17 +232,23 @@ def main():
     resource_catalog = fetch_resource_catalog()
     print(f"Loaded {len(resource_catalog)} resources from XM catalog")
 
-    daily = fetch_daily(resource_catalog)
-    with open("data/colombia_daily_mix.json", "w", encoding="utf-8") as f:
-        json.dump(daily, f, indent=2, ensure_ascii=False)
-    print("Wrote data/colombia_daily_mix.json")
-    print(json.dumps(daily, indent=2, ensure_ascii=False))
+    try:
+        daily = fetch_daily(resource_catalog)
+        with open("data/colombia_daily_mix.json", "w", encoding="utf-8") as f:
+            json.dump(daily, f, indent=2, ensure_ascii=False)
+        print("Wrote data/colombia_daily_mix.json")
+        print(json.dumps(daily, indent=2, ensure_ascii=False))
+    except SystemExit as e:
+        print(f"WARNING: daily fetch failed ({e}), skipping daily output this run.")
 
-    ytd = fetch_ytd(resource_catalog)
-    with open("data/colombia_ytd_mix.json", "w", encoding="utf-8") as f:
-        json.dump(ytd, f, indent=2, ensure_ascii=False)
-    print("Wrote data/colombia_ytd_mix.json")
-    print(json.dumps(ytd, indent=2, ensure_ascii=False))
+    try:
+        ytd = fetch_ytd(resource_catalog)
+        with open("data/colombia_ytd_mix.json", "w", encoding="utf-8") as f:
+            json.dump(ytd, f, indent=2, ensure_ascii=False)
+        print("Wrote data/colombia_ytd_mix.json")
+        print(json.dumps(ytd, indent=2, ensure_ascii=False))
+    except SystemExit as e:
+        print(f"WARNING: YTD fetch failed ({e}), skipping YTD output this run.")
 
 
 if __name__ == "__main__":

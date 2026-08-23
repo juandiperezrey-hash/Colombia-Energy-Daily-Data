@@ -2,15 +2,19 @@
 fetch_colombia_mix.py
 
 Pulls Colombia's real electricity generation (MetricId "Gene") from XM's public
-API (SINERGOX), from Jan 1 of the current year through today, broken down by
-generation resource (power plant). It then maps each resource to its fuel
-type using XM's "ListadoRecursos" catalog, sums energy by fuel type, and
-writes a JSON file with percentage shares in the same shape the Cordillera
-Energy website expects for its pie charts.
+API (SINERGOX), broken down by generation resource (power plant), for both a
+single recent day and the year-to-date accumulated period. It maps each
+resource to its fuel type using XM's "ListadoRecursos" catalog, sums energy
+by fuel type, and writes JSON files in the shape the Cordillera Energy
+website expects for its pie charts.
 
 No API key or account is required — XM's API is public.
 
 Docs: https://github.com/EquipoAnaliticaXM/API_XM
+
+IMPORTANT (learned from a live run): XM's responses nest each record as
+{"Date": "...", "ListEntities": [{"Id": <code>, "Values": {...}}, ...]}
+rather than a flat dict — this script parses that shape.
 """
 
 import json
@@ -23,28 +27,28 @@ import requests
 BASE_URL = "https://servapibi.xm.com.co"
 HEADERS = {"Content-Type": "application/json"}
 
-# XM's public daily endpoint accepts a maximum 30-day window per call, so we
-# fetch in monthly-sized chunks and stitch the results together.
+# XM's public hourly/daily endpoints accept a maximum 30-day window per call.
 CHUNK_DAYS = 28
 
-# Maps XM's raw "Tipo" (or "Combustible") resource categories to the labels
-# used on the website's pie chart. Extend this if XM introduces new categories.
+# Maps XM's raw "Type" resource categories to the labels used on the website's
+# pie chart. Extend this if XM introduces new categories.
 FUEL_TYPE_MAP = {
     "HIDRAULICA": "Hydropower",
     "SOLAR": "Solar",
     "EOLICA": "Wind",
-    "TERMICA": "Gas",          # bucket thermal plants under Gas unless fuel says otherwise
+    "TERMICA": "Gas",          # bucket thermal plants under Gas unless EnerSource says otherwise
     "COGENERADOR": "Biomass",
     "BIOMASA": "Biomass",
     "AUTOGENERADOR": "Other",
 }
 
-# Some thermal plants run on coal/liquid fuels rather than gas — if the
-# resource listing exposes a "Combustible" column, refine the bucket here.
-THERMAL_FUEL_OVERRIDE = {
+# Some thermal plants run on coal/liquid fuels rather than gas — refine using
+# the resource catalog's "EnerSource" field when Type == TERMICA.
+ENERSOURCE_OVERRIDE = {
     "CARBON": "Coal, wind & other",
     "ACPM": "Coal, wind & other",
     "FUEL OIL": "Coal, wind & other",
+    "JET A1": "Coal, wind & other",
     "JET-A1": "Coal, wind & other",
     "GAS": "Gas",
 }
@@ -59,23 +63,21 @@ def daterange_chunks(start: dt.date, end: dt.date, chunk_days: int):
 
 
 def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date) -> list:
-    """Calls XM's /daily endpoint for a given metric/entity and date range."""
+    """Calls XM's /hourly endpoint (confirmed correct for MetricId 'Gene' —
+    the /daily endpoint returns 'Id de Métrica no encontrada' for it)."""
     body = {
         "MetricId": metric_id,
         "StartDate": start.isoformat(),
         "EndDate": end.isoformat(),
         "Entity": entity,
-        "Filter": [],
     }
-    resp = requests.post(f"{BASE_URL}/daily", json=body, headers=HEADERS, timeout=60)
+    resp = requests.post(f"{BASE_URL}/hourly", json=body, headers=HEADERS, timeout=60)
     if not resp.ok:
         print(f"  XM API error {resp.status_code} for {metric_id}/{entity} "
               f"{start}->{end}. Response body:\n{resp.text[:2000]}")
         resp.raise_for_status()
     payload = resp.json()
     items = payload.get("Items", payload.get("items", []))
-    if items:
-        print(f"  Sample item keys for {metric_id}: {list(items[0].keys())}")
     return items
 
 
@@ -83,7 +85,13 @@ def fetch_resource_catalog() -> dict:
     """
     Fetches XM's resource listing (plant -> fuel type / technology) so we can
     map each generator code (e.g. 'TBST') to a human fuel category.
-    Returns {resource_code: fuel_type_str}
+
+    Response shape: {"Items": [{"Date": "...", "ListEntities": [
+        {"Id": "Sistema", "Values": {"Code": "2QBW", "Type": "HIDRAULICA",
+                                      "EnerSource": "AGUA", ...}}
+    ]}, ...]}
+
+    Returns {resource_code: {"tipo": ..., "enersource": ...}}
     """
     body = {"MetricId": "ListadoRecursos"}
     resp = requests.post(f"{BASE_URL}/lists", json=body, headers=HEADERS, timeout=60)
@@ -94,25 +102,23 @@ def fetch_resource_catalog() -> dict:
     payload = resp.json()
     items = payload.get("Items", payload.get("items", []))
     print(f"  ListadoRecursos returned {len(items)} raw items")
-    if items:
-        print(f"  Sample item: {json.dumps(items[0], ensure_ascii=False)[:1000]}")
 
     mapping = {}
     for item in items:
-        # Field names vary by XM release; try the common variants defensively.
-        code = (item.get("Values_Code") or item.get("Codigo") or item.get("Values_Recurso")
-                or item.get("Values_Cod") or item.get("Values_code"))
-        tipo = (item.get("Values_Type") or item.get("Tipo") or item.get("Values_TipoGeneracion") or "").upper()
-        combustible = (item.get("Values_Fuel") or item.get("Combustible") or item.get("Values_Combustible") or "").upper()
-        if not code:
-            continue
-        mapping[code] = {"tipo": tipo, "combustible": combustible}
+        for entity in item.get("ListEntities", []):
+            values = entity.get("Values", {})
+            code = values.get("Code")
+            tipo = (values.get("Type") or "").upper()
+            enersource = (values.get("EnerSource") or "").upper()
+            if not code:
+                continue
+            mapping[code] = {"tipo": tipo, "enersource": enersource}
     return mapping
 
 
-def classify(tipo: str, combustible: str) -> str:
-    if tipo == "TERMICA" and combustible in THERMAL_FUEL_OVERRIDE:
-        return THERMAL_FUEL_OVERRIDE[combustible]
+def classify(tipo: str, enersource: str) -> str:
+    if tipo == "TERMICA" and enersource in ENERSOURCE_OVERRIDE:
+        return ENERSOURCE_OVERRIDE[enersource]
     return FUEL_TYPE_MAP.get(tipo, "Other")
 
 
@@ -140,34 +146,45 @@ def build_mix(totals_by_fuel: dict) -> list:
 
 
 def sum_generation(items: list, resource_catalog: dict) -> dict:
+    """
+    items: list of {"Date": "...", "ListEntities": [{"Id": <resource_code>,
+                                                       "Values": {<hour keys>: <number>, ...}}]}
+    Sums every numeric value found under each entity's "Values" dict (robust
+    to whatever the hour-key naming convention turns out to be), then buckets
+    the total by fuel type using the resource catalog.
+    """
     totals_by_fuel = defaultdict(float)
     unmapped_resources = set()
+    matched = 0
 
     for item in items:
-        resource_code = item.get("Values_code") or item.get("Codigo")
-        if not resource_code:
-            continue
+        for entity in item.get("ListEntities", []):
+            resource_code = entity.get("Id")
+            values = entity.get("Values", {})
+            if not resource_code:
+                continue
 
-        day_total = 0.0
-        for key, val in item.items():
-            if key.lower().startswith("values_hour") or key.lower().startswith("value"):
+            day_total = 0.0
+            for val in values.values():
                 try:
                     day_total += float(val)
                 except (TypeError, ValueError):
                     continue
 
-        info = resource_catalog.get(resource_code)
-        if not info:
-            unmapped_resources.add(resource_code)
-            fuel = "Other"
-        else:
-            fuel = classify(info["tipo"], info["combustible"])
+            info = resource_catalog.get(resource_code)
+            if not info:
+                unmapped_resources.add(resource_code)
+                fuel = "Other"
+            else:
+                fuel = classify(info["tipo"], info["enersource"])
+                matched += 1
 
-        totals_by_fuel[fuel] += day_total
+            totals_by_fuel[fuel] += day_total
 
+    print(f"  Matched {matched} resource-days to a known fuel type "
+          f"({len(unmapped_resources)} unique unmapped codes bucketed as 'Other')")
     if unmapped_resources:
-        print(f"  Warning: {len(unmapped_resources)} resource codes had no catalog match "
-              f"(bucketed as 'Other'): {sorted(unmapped_resources)[:10]}...")
+        print(f"    Sample unmapped codes: {sorted(unmapped_resources)[:10]}")
 
     return totals_by_fuel
 
@@ -175,7 +192,7 @@ def sum_generation(items: list, resource_catalog: dict) -> dict:
 def fetch_daily(resource_catalog: dict) -> dict:
     """Most recently completed day. XM usually needs 1-2 days to finalise
     'Gene' data, so we step back from 2 days ago and try a few days if needed."""
-    for days_back in (2, 3, 4, 5):
+    for days_back in (2, 3, 4, 5, 6):
         candidate = dt.date.today() - dt.timedelta(days=days_back)
         print(f"Fetching Colombia daily generation: trying {candidate}")
         try:
@@ -195,6 +212,7 @@ def fetch_daily(resource_catalog: dict) -> dict:
                     "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
                     "mix": mix,
                 }
+        print(f"  {candidate} returned no usable data, trying an earlier day...")
     raise SystemExit("No daily generation data returned from XM after trying several recent days.")
 
 
@@ -253,4 +271,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

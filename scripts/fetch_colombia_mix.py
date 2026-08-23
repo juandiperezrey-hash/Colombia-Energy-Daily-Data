@@ -102,58 +102,7 @@ def classify(tipo: str, combustible: str) -> str:
     return FUEL_TYPE_MAP.get(tipo, "Other")
 
 
-def main():
-    today = dt.date.today()
-    jan_1 = dt.date(today.year, 1, 1)
-
-    print(f"Fetching Colombia generation by resource: {jan_1} -> {today}")
-
-    resource_catalog = fetch_resource_catalog()
-    print(f"  Loaded {len(resource_catalog)} resources from XM catalog")
-
-    totals_by_fuel = defaultdict(float)
-    unmapped_resources = set()
-
-    for start, end in daterange_chunks(jan_1, today, CHUNK_DAYS):
-        print(f"  Fetching {start} -> {end} ...")
-        items = fetch_metric("Gene", "Recurso", start, end)
-
-        for item in items:
-            resource_code = item.get("Values_code") or item.get("Codigo")
-            if not resource_code:
-                continue
-
-            # Daily values come back as Values_Hour01..Values_Hour24 (kWh) in
-            # some XM releases, or already summed into a single daily value
-            # depending on metric/version — sum whatever hourly/period keys exist.
-            day_total = 0.0
-            for key, val in item.items():
-                if key.lower().startswith("values_hour") or key.lower().startswith("value"):
-                    try:
-                        day_total += float(val)
-                    except (TypeError, ValueError):
-                        continue
-
-            info = resource_catalog.get(resource_code)
-            if not info:
-                unmapped_resources.add(resource_code)
-                fuel = "Other"
-            else:
-                fuel = classify(info["tipo"], info["combustible"])
-
-            totals_by_fuel[fuel] += day_total
-
-        time.sleep(1)  # be polite to the public API between chunks
-
-    if unmapped_resources:
-        print(f"  Warning: {len(unmapped_resources)} resource codes had no catalog match "
-              f"(bucketed as 'Other'): {sorted(unmapped_resources)[:10]}...")
-
-    grand_total = sum(totals_by_fuel.values())
-    if grand_total == 0:
-        raise SystemExit("No generation data returned — check XM API availability/response shape.")
-
-    # Website's existing color palette, keyed by label used elsewhere on the site.
+def build_mix(totals_by_fuel: dict) -> list:
     colors = {
         "Hydropower": "#2E86DE",
         "Gas": "#7C8B99",
@@ -163,8 +112,10 @@ def main():
         "Coal, wind & other": "#8E44AD",
         "Other": "#E8B923",
     }
-
-    mix = [
+    grand_total = sum(totals_by_fuel.values())
+    if grand_total == 0:
+        return []
+    return [
         {
             "label": label,
             "value": round(total / grand_total * 100, 1),
@@ -173,7 +124,83 @@ def main():
         for label, total in sorted(totals_by_fuel.items(), key=lambda kv: -kv[1])
     ]
 
-    output = {
+
+def sum_generation(items: list, resource_catalog: dict) -> dict:
+    totals_by_fuel = defaultdict(float)
+    unmapped_resources = set()
+
+    for item in items:
+        resource_code = item.get("Values_code") or item.get("Codigo")
+        if not resource_code:
+            continue
+
+        day_total = 0.0
+        for key, val in item.items():
+            if key.lower().startswith("values_hour") or key.lower().startswith("value"):
+                try:
+                    day_total += float(val)
+                except (TypeError, ValueError):
+                    continue
+
+        info = resource_catalog.get(resource_code)
+        if not info:
+            unmapped_resources.add(resource_code)
+            fuel = "Other"
+        else:
+            fuel = classify(info["tipo"], info["combustible"])
+
+        totals_by_fuel[fuel] += day_total
+
+    if unmapped_resources:
+        print(f"  Warning: {len(unmapped_resources)} resource codes had no catalog match "
+              f"(bucketed as 'Other'): {sorted(unmapped_resources)[:10]}...")
+
+    return totals_by_fuel
+
+
+def fetch_daily(resource_catalog: dict) -> dict:
+    """Most recently completed day (yesterday — XM typically finalises 'Gene' a day behind)."""
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+    print(f"Fetching Colombia daily generation: {yesterday}")
+
+    items = fetch_metric("Gene", "Recurso", yesterday, yesterday)
+    totals_by_fuel = sum_generation(items, resource_catalog)
+    mix = build_mix(totals_by_fuel)
+
+    if not mix:
+        raise SystemExit("No daily generation data returned from XM.")
+
+    return {
+        "country": "Colombia",
+        "period_start": yesterday.isoformat(),
+        "period_end": yesterday.isoformat(),
+        "generated_at_utc": dt.datetime.utcnow().isoformat() + "Z",
+        "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
+        "mix": mix,
+    }
+
+
+def fetch_ytd(resource_catalog: dict) -> dict:
+    """Accumulated mix from Jan 1 of the current year through today."""
+    today = dt.date.today()
+    jan_1 = dt.date(today.year, 1, 1)
+
+    print(f"Fetching Colombia YTD generation: {jan_1} -> {today}")
+
+    totals_by_fuel = defaultdict(float)
+    for start, end in daterange_chunks(jan_1, today, CHUNK_DAYS):
+        print(f"  Fetching {start} -> {end} ...")
+        items = fetch_metric("Gene", "Recurso", start, end)
+        chunk_totals = sum_generation(items, resource_catalog)
+        for fuel, total in chunk_totals.items():
+            totals_by_fuel[fuel] += total
+        time.sleep(1)  # be polite to the public API between chunks
+
+    mix = build_mix(totals_by_fuel)
+    if not mix:
+        raise SystemExit("No YTD generation data returned from XM.")
+
+    return {
         "country": "Colombia",
         "period_start": jan_1.isoformat(),
         "period_end": today.isoformat(),
@@ -182,12 +209,24 @@ def main():
         "mix": mix,
     }
 
-    with open("data/colombia_ytd_mix.json", "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
 
+def main():
+    resource_catalog = fetch_resource_catalog()
+    print(f"Loaded {len(resource_catalog)} resources from XM catalog")
+
+    daily = fetch_daily(resource_catalog)
+    with open("data/colombia_daily_mix.json", "w", encoding="utf-8") as f:
+        json.dump(daily, f, indent=2, ensure_ascii=False)
+    print("Wrote data/colombia_daily_mix.json")
+    print(json.dumps(daily, indent=2, ensure_ascii=False))
+
+    ytd = fetch_ytd(resource_catalog)
+    with open("data/colombia_ytd_mix.json", "w", encoding="utf-8") as f:
+        json.dump(ytd, f, indent=2, ensure_ascii=False)
     print("Wrote data/colombia_ytd_mix.json")
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+    print(json.dumps(ytd, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     main()
+

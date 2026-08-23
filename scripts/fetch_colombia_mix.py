@@ -62,7 +62,7 @@ def daterange_chunks(start: dt.date, end: dt.date, chunk_days: int):
         cur = chunk_end + dt.timedelta(days=1)
 
 
-def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date) -> list:
+def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date, filter_codes=None) -> list:
     """Calls XM's /hourly endpoint (confirmed correct for MetricId 'Gene' —
     the /daily endpoint returns 'Id de Métrica no encontrada' for it)."""
     body = {
@@ -71,6 +71,8 @@ def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date) -> l
         "EndDate": end.isoformat(),
         "Entity": entity,
     }
+    if filter_codes:
+        body["Filter"] = filter_codes
     resp = requests.post(f"{BASE_URL}/hourly", json=body, headers=HEADERS, timeout=60)
     if not resp.ok:
         print(f"  XM API error {resp.status_code} for {metric_id}/{entity} "
@@ -78,6 +80,12 @@ def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date) -> l
         resp.raise_for_status()
     payload = resp.json()
     items = payload.get("Items", payload.get("items", []))
+    print(f"  -> {len(items)} items returned for {start}->{end}"
+          f"{' (with ' + str(len(filter_codes)) + '-code filter)' if filter_codes else ' (no filter)'}")
+    if not items:
+        print(f"  Raw response (first 500 chars): {resp.text[:500]}")
+    elif items and not items[0].get("ListEntities"):
+        print(f"  Sample item (unexpected shape): {json.dumps(items[0], ensure_ascii=False)[:800]}")
     return items
 
 
@@ -192,11 +200,12 @@ def sum_generation(items: list, resource_catalog: dict) -> dict:
 def fetch_daily(resource_catalog: dict) -> dict:
     """Most recently completed day. XM usually needs 1-2 days to finalise
     'Gene' data, so we step back from 2 days ago and try a few days if needed."""
+    codes = list(resource_catalog.keys())
     for days_back in (2, 3, 4, 5, 6):
         candidate = dt.date.today() - dt.timedelta(days=days_back)
         print(f"Fetching Colombia daily generation: trying {candidate}")
         try:
-            items = fetch_metric("Gene", "Recurso", candidate, candidate)
+            items = fetch_metric("Gene", "Recurso", candidate, candidate, filter_codes=codes)
         except requests.exceptions.HTTPError:
             print(f"  {candidate} failed, trying an earlier day...")
             continue
@@ -220,13 +229,14 @@ def fetch_ytd(resource_catalog: dict) -> dict:
     """Accumulated mix from Jan 1 of the current year through today."""
     today = dt.date.today()
     jan_1 = dt.date(today.year, 1, 1)
+    codes = list(resource_catalog.keys())
 
     print(f"Fetching Colombia YTD generation: {jan_1} -> {today}")
 
     totals_by_fuel = defaultdict(float)
     for start, end in daterange_chunks(jan_1, today, CHUNK_DAYS):
         print(f"  Fetching {start} -> {end} ...")
-        items = fetch_metric("Gene", "Recurso", start, end)
+        items = fetch_metric("Gene", "Recurso", start, end, filter_codes=codes)
         chunk_totals = sum_generation(items, resource_catalog)
         for fuel, total in chunk_totals.items():
             totals_by_fuel[fuel] += total

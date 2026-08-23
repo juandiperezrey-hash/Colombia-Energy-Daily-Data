@@ -84,7 +84,7 @@ def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date, filt
           f"{' (with ' + str(len(filter_codes)) + '-code filter)' if filter_codes else ' (no filter)'}")
     if not items:
         print(f"  Raw response (first 500 chars): {resp.text[:500]}")
-    elif items and not items[0].get("ListEntities"):
+    elif items and not (items[0].get("HourlyEntities") or items[0].get("ListEntities")):
         print(f"  Sample item (unexpected shape): {json.dumps(items[0], ensure_ascii=False)[:800]}")
     return items
 
@@ -155,29 +155,31 @@ def build_mix(totals_by_fuel: dict) -> list:
 
 def sum_generation(items: list, resource_catalog: dict) -> dict:
     """
-    items: list of {"Date": "...", "ListEntities": [{"Id": <resource_code>,
-                                                       "Values": {<hour keys>: <number>, ...}}]}
-    Sums every numeric value found under each entity's "Values" dict (robust
-    to whatever the hour-key naming convention turns out to be), then buckets
-    the total by fuel type using the resource catalog.
+    items: list of {"Date": "...", "HourlyEntities": [{"Id": "Recurso", "Values":
+                     {"code": <resource_code>, "Hour01": "123.4", ..., "Hour24": "..."}}]}
+    (Confirmed live from XM: the /hourly endpoint wraps entities under
+    "HourlyEntities", not "ListEntities" — and the resource code lives at
+    Values.code, not at the entity's top-level "Id".)
     """
     totals_by_fuel = defaultdict(float)
     unmapped_resources = set()
     matched = 0
 
     for item in items:
-        for entity in item.get("ListEntities", []):
-            resource_code = entity.get("Id")
+        entities = item.get("HourlyEntities") or item.get("ListEntities") or []
+        for entity in entities:
             values = entity.get("Values", {})
-            if not resource_code:
+            resource_code = values.get("code") or values.get("Code") or entity.get("Id")
+            if not resource_code or resource_code in ("Recurso", "Sistema"):
                 continue
 
             day_total = 0.0
-            for val in values.values():
-                try:
-                    day_total += float(val)
-                except (TypeError, ValueError):
-                    continue
+            for key, val in values.items():
+                if key.lower().startswith("hour"):
+                    try:
+                        day_total += float(val)
+                    except (TypeError, ValueError):
+                        continue
 
             info = resource_catalog.get(resource_code)
             if not info:

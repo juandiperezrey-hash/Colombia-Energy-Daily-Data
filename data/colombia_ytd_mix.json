@@ -1,13 +1,13 @@
 {
   "country": "Colombia",
   "period_start": "2026-01-01",
-  "period_end": "2026-08-23",
-  "generated_at_utc": "2026-08-23T10:56:40.039912Z",
+  "period_end": "2026-08-24",
+  "generated_at_utc": "2026-08-24T11:15:24.534443Z",
   "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
   "mix": [
     {
       "label": "Hydropower",
-      "value": 73.6,
+      "value": 73.5,
       "color": "#2E86DE"
     },
     {

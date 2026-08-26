@@ -1,8 +1,8 @@
 {
   "country": "Colombia",
   "period_start": "2026-01-01",
-  "period_end": "2026-08-24",
-  "generated_at_utc": "2026-08-24T11:15:24.534443Z",
+  "period_end": "2026-08-26",
+  "generated_at_utc": "2026-08-26T16:34:49.946555Z",
   "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
   "mix": [
     {
@@ -22,7 +22,7 @@
     },
     {
       "label": "Coal, wind & other",
-      "value": 7.7,
+      "value": 7.8,
       "color": "#8E44AD"
     },
     {

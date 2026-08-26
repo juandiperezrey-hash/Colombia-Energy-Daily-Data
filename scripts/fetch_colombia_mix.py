@@ -62,6 +62,23 @@ def daterange_chunks(start: dt.date, end: dt.date, chunk_days: int):
         cur = chunk_end + dt.timedelta(days=1)
 
 
+def _post_with_retry(url: str, body: dict, max_attempts: int = 3, timeout: int = 120):
+    """POSTs to XM with retries on timeout/connection errors — XM's API is
+    occasionally slow to respond to large-filter requests, so a single
+    timeout shouldn't fail the whole run."""
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return requests.post(url, json=body, headers=HEADERS, timeout=timeout)
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            wait = 10 * attempt
+            print(f"  Request to {url} timed out/failed (attempt {attempt}/{max_attempts}): {e}. "
+                  f"Retrying in {wait}s...")
+            time.sleep(wait)
+    raise last_error
+
+
 def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date, filter_codes=None) -> list:
     """Calls XM's /hourly endpoint (confirmed correct for MetricId 'Gene' —
     the /daily endpoint returns 'Id de Métrica no encontrada' for it)."""
@@ -73,7 +90,7 @@ def fetch_metric(metric_id: str, entity: str, start: dt.date, end: dt.date, filt
     }
     if filter_codes:
         body["Filter"] = filter_codes
-    resp = requests.post(f"{BASE_URL}/hourly", json=body, headers=HEADERS, timeout=60)
+    resp = _post_with_retry(f"{BASE_URL}/hourly", body)
     if not resp.ok:
         print(f"  XM API error {resp.status_code} for {metric_id}/{entity} "
               f"{start}->{end}. Response body:\n{resp.text[:2000]}")
@@ -102,7 +119,7 @@ def fetch_resource_catalog() -> dict:
     Returns {resource_code: {"tipo": ..., "enersource": ...}}
     """
     body = {"MetricId": "ListadoRecursos"}
-    resp = requests.post(f"{BASE_URL}/lists", json=body, headers=HEADERS, timeout=60)
+    resp = _post_with_retry(f"{BASE_URL}/lists", body)
     if not resp.ok:
         print(f"  XM API error {resp.status_code} for ListadoRecursos. "
               f"Response body:\n{resp.text[:2000]}")
@@ -283,3 +300,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+     'fix: add retry logic for XM timeouts'

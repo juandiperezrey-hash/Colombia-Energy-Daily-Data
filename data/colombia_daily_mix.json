@@ -1,38 +1,38 @@
 {
   "country": "Colombia",
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-04",
-  "generated_at_utc": "2026-09-07T10:10:42.031747Z",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-05",
+  "generated_at_utc": "2026-09-08T10:11:38.200240Z",
   "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
   "mix": [
     {
       "label": "Hydropower",
-      "value": 64.2,
+      "value": 64.5,
       "color": "#2E86DE"
     },
     {
       "label": "Gas",
-      "value": 14.5,
+      "value": 13.0,
       "color": "#7C8B99"
     },
     {
       "label": "Coal, wind & other",
-      "value": 11.8,
+      "value": 12.5,
       "color": "#8E44AD"
     },
     {
       "label": "Solar",
-      "value": 8.4,
+      "value": 8.7,
       "color": "#F2A93B"
     },
     {
       "label": "Biomass",
-      "value": 0.9,
+      "value": 1.0,
       "color": "#A0522D"
     },
     {
       "label": "Wind",
-      "value": 0.1,
+      "value": 0.2,
       "color": "#14B8A6"
     }
   ]

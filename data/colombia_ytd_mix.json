@@ -1,8 +1,8 @@
 {
   "country": "Colombia",
   "period_start": "2026-01-01",
-  "period_end": "2026-10-10",
-  "generated_at_utc": "2026-10-10T15:46:35.872888Z",
+  "period_end": "2026-10-11",
+  "generated_at_utc": "2026-10-11T16:10:44.668592Z",
   "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
   "mix": [
     {

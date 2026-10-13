@@ -1,8 +1,8 @@
 {
   "country": "Colombia",
   "period_start": "2026-01-01",
-  "period_end": "2026-10-12",
-  "generated_at_utc": "2026-10-12T19:40:21.404753Z",
+  "period_end": "2026-10-13",
+  "generated_at_utc": "2026-10-13T17:25:37.872510Z",
   "source": "XM (Administrador del Mercado de Energía Mayorista de Colombia) — SINERGOX public API",
   "mix": [
     {
@@ -22,7 +22,7 @@
     },
     {
       "label": "Solar",
-      "value": 7.9,
+      "value": 7.8,
       "color": "#F2A93B"
     },
     {
